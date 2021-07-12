@@ -1,18 +1,53 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
+import (
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+	"time"
+)
 
+const (
+	IDLE        = 0
+	IN_PROGRESS = 1
+	COMPLETED   = 2
+	MAP         = 0
+	REDUCE      = 1
+)
+
+type Task struct {
+	lock      sync.Mutex
+	filename  string
+	state     int
+	timestamp time.Time
+}
 
 type Master struct {
-	// Your definitions here.
-
+	mu     sync.Mutex
+	remain int
+	phase  int
+	mtasks []*Task
+	rtasks []*Task
 }
 
 // Your code here -- RPC handlers for the worker to call.
+
+// give the asking worker a task if possible
+// otherwise tell the worker there's no work for him/her to do
+func (m *Master) HandleAsk(args *AskArgs, reply *AskReply) error {
+	// TODO
+	return nil
+}
+
+// receive response from a worker, ignore it if the worker's performing time exceeds 10s
+func (m *Master) HandleResponse(args *ResponseArgs, reply *ResponseReply) error {
+	// TODO
+	return nil
+}
 
 //
 // an example RPC handler.
@@ -23,7 +58,6 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -48,8 +82,11 @@ func (m *Master) server() {
 func (m *Master) Done() bool {
 	ret := false
 
-	// Your code here.
-
+	m.mu.Lock()
+	if m.remain == 0 {
+		ret = true
+	}
+	m.mu.Unlock()
 
 	return ret
 }
@@ -60,11 +97,27 @@ func (m *Master) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{}
+	master := Master{}
+	master.mu = sync.Mutex{}
+	master.remain = nReduce
+	master.phase = MAP
 
-	// Your code here.
+	// initialize master data structure
+	for _, file := range files {
+		mtask := new(Task)
+		mtask.lock = sync.Mutex{}
+		mtask.filename = file
+		mtask.state = IDLE
+		master.mtasks = append(master.mtasks, mtask)
+	}
 
+	for i := 0; i < nReduce; i++ {
+		master.rtasks[i] = new(Task)
+		master.rtasks[i].lock = sync.Mutex{}
+	}
 
-	m.server()
-	return &m
+	fmt.Printf("Master initialization completed\n")
+
+	master.server()
+	return &master
 }

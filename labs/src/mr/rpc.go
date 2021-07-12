@@ -6,8 +6,11 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
+	"time"
+)
 
 //
 // example to show how to declare the arguments
@@ -24,6 +27,19 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type AskArgs struct{}
+
+type AskReply struct {
+	kind      string
+	file      string
+	timestamp time.Time
+}
+
+type ResponseArgs struct {
+	kind string
+	num  int
+}
+type ResponseReply struct{}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.
