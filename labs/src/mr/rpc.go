@@ -9,7 +9,6 @@ package mr
 import (
 	"os"
 	"strconv"
-	"time"
 )
 
 //
@@ -30,14 +29,16 @@ type ExampleReply struct {
 type AskArgs struct{}
 
 type AskReply struct {
-	kind      string
-	file      string
-	timestamp time.Time
+	kind    string
+	file    string
+	splite  int
+	nReduce int
+	index   int
 }
 
 type ResponseArgs struct {
-	kind string
-	num  int
+	kind  string
+	index int
 }
 type ResponseReply struct{}
 

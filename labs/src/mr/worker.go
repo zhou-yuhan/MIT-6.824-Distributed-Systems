@@ -1,10 +1,15 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io/ioutil"
 	"log"
 	"net/rpc"
+	"os"
+	"sort"
+	"time"
 )
 
 //
@@ -14,6 +19,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -25,16 +38,169 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+func performMap(mapf func(string, string) []KeyValue, filename string, nReduce int, index int) bool {
+	kvall := make([][]KeyValue, nReduce)
+	file, err := os.Open(filename)
+	if err != nil {
+		fmt.Printf("Worker: can not open %v\n", filename)
+		return false
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		fmt.Printf("Worker: can not read %v\n", filename)
+		return false
+	}
+	file.Close()
+
+	map_res := mapf(filename, string(content))
+
+	// map result are mapped into `nReduce` bucket
+	for _, kv := range map_res {
+		index := ihash(kv.Key) % nReduce
+		kvall[index] = append(kvall[index], kv)
+	}
+
+	// write key-value to different json files
+	for i, kva := range kvall {
+		// implement atomical write by two-phase trick: write to a temporary file and rename it
+		oldname := fmt.Sprintf("temp_inter_%d_%d", index, i)
+		tempfile, err := ioutil.TempFile("", oldname)
+		if err != nil {
+			fmt.Printf("Worker: map can not open temp file %v\n", oldname)
+			return false
+		}
+		enc := json.NewEncoder(tempfile)
+		for _, kv := range kva {
+			if err := enc.Encode(&kv); err != nil {
+				fmt.Printf("Worker: map can not write to temp file %v\n", oldname)
+				return false
+			}
+		}
+
+		newname := fmt.Sprintf("inter_%d_%d", index, i)
+		if err := os.Rename(oldname, newname); err != nil {
+			fmt.Printf("Worker: map can not rename temp file %v\n", oldname)
+			return false
+		}
+	}
+	return true
+}
+
+// worker perform reduce task
+// gather all key-value stored in intermidiate files named `inter_*_index`
+// and write to a single file `mr-out-index`
+func performReduce(reducef func(string, []string) string, splite int, index int) bool {
+	var kva []KeyValue
+	for i := 0; i < splite; i++ {
+		filename := fmt.Sprintf("inter_%d_%d", i, index)
+		file, err := os.Open(filename)
+		if err != nil {
+			fmt.Printf("Worker: can not read intermidiate file %v\n", filename)
+			return false
+		}
+
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+		file.Close()
+	}
+
+	sort.Sort(ByKey(kva))
+
+	// two-phase trick to implement atomical write
+	oldname := fmt.Sprintf("temp-mr-out-%d", index)
+	newname := fmt.Sprint("mr-out-%d", index)
+
+	tempfile, err := ioutil.TempFile("", oldname)
+	if err != nil {
+		fmt.Printf("Worker: reduce can not open temp file %v\n", oldname)
+		return false
+	}
+
+	// reduce on values that have the same key
+	i := 0
+	for i < len(kva) {
+		j := i + 1
+		for j < len(kva) && kva[i].Key == kva[j].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, kva[k].Value)
+		}
+		output := reducef(kva[i].Key, values)
+
+		fmt.Fprintf(tempfile, "%v %v\n", kva[i].Key, output)
+
+		i = j
+	}
+
+	if err := os.Rename(oldname, newname); err != nil {
+		fmt.Printf("Worker: reduce can not rename temp file %v\n", oldname)
+		return false
+	}
+
+	return true
+}
+
 //
 // main/mrworker.go calls this function.
-// worker asks the master for a task and perform
-// after performing the task, the worker informs the master
+// worker periodically asks the master for a task and perform until the master can not be connected
+// after performing each task, the worker informs the master
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
+	for {
+		args := AskArgs{}
+		reply := AskReply{}
+		if !(call("Master.HandleAsk", &args, &reply)) {
+			// can not connect to the master
+			// assume that the master has exited, then exit
+			fmt.Printf("Worker: exit")
+			os.Exit(0)
+		}
+		if reply.kind == "none" {
+			// no work to do
+			continue
+		}
+
+		// perform the task and informs the master
+
+		response_args := ResponseArgs{}
+		response_reply := ResponseReply{}
+		if reply.kind == "map" {
+			if performMap(mapf, reply.file, reply.nReduce, reply.index) {
+				fmt.Printf("Worker: map task performed successfully\n")
+				response_args.kind = "map"
+				response_args.index = reply.index
+				if !(call("Master.HandleResponse", &response_args, &response_reply)) {
+					fmt.Printf("Worker: exit")
+					os.Exit(0)
+				}
+			} else {
+				fmt.Printf("Worker: map task failed\n")
+			}
+		} else {
+			if performReduce(reducef, reply.splite, reply.index) {
+				fmt.Printf("Worker: reduce task performed successfully\n")
+				response_args.kind = "reduce"
+				response_args.index = reply.index
+				if !(call("Master.HandleResponse", &response_args, &response_reply)) {
+					fmt.Printf("Worker: exit")
+					os.Exit(0)
+				}
+			}
+		}
+
+		time.Sleep(time.Second)
+	}
 	// uncomment to send the Example RPC to the master.
 	// CallExample()
-
 }
 
 //

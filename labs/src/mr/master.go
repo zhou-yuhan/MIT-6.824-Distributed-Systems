@@ -27,25 +27,93 @@ type Task struct {
 }
 
 type Master struct {
-	mu     sync.Mutex
-	remain int
-	phase  int
-	mtasks []*Task
-	rtasks []*Task
+	mu            sync.Mutex
+	map_remain    int
+	reduce_remain int
+	mtasks        []*Task
+	rtasks        []*Task
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
+// for each allocated task, the master waits for 10s
+// after 10s, the master checks if the task has been completed
+// if the task has not been finished by the worker in 10s, the master gives up
+func wait(task *Task) {
+	time.Sleep(10 * time.Second)
+
+	task.lock.Lock()
+	if task.state == COMPLETED {
+		fmt.Printf("Master: task %s completed\n", task.filename)
+	} else {
+		task.state = IDLE
+		fmt.Printf("Master: task %s failed, re-allocate to othter workers\n", task.filename)
+	}
+	task.lock.Unlock()
+}
+
 // give the asking worker a task if possible
 // otherwise tell the worker there's no work for him/her to do
 func (m *Master) HandleAsk(args *AskArgs, reply *AskReply) error {
-	// TODO
+	reply.kind = "none"
+	if m.map_remain != 0 {
+		// look for a map task
+		for i, task := range m.mtasks {
+			task.lock.Lock()
+			defer task.lock.Unlock()
+			if task.state == IDLE {
+				task.state = IN_PROGRESS
+				reply.kind = "map"
+				reply.file = task.filename
+				reply.nReduce = len(m.rtasks)
+				reply.index = i
+				task.timestamp = time.Now()
+				go wait(task) // start timer
+				break
+			}
+		}
+	} else {
+		// look for a reduce task
+		for i, task := range m.rtasks {
+			task.lock.Lock()
+			defer task.lock.Unlock()
+			if task.state == IDLE {
+				task.state = IN_PROGRESS
+				reply.kind = "reduce"
+				reply.splite = len(m.mtasks)
+				reply.index = i
+				task.timestamp = time.Now()
+				go wait(task) // start timer
+				break
+			}
+		}
+	}
 	return nil
 }
 
 // receive response from a worker, ignore it if the worker's performing time exceeds 10s
 func (m *Master) HandleResponse(args *ResponseArgs, reply *ResponseReply) error {
-	// TODO
+	now := time.Now()
+	var task *Task
+	if args.kind == "map" {
+		task = m.mtasks[args.index]
+	} else {
+		task = m.rtasks[args.index]
+	}
+
+	if now.Before(task.timestamp.Add(10 * time.Second)) {
+		task.lock.Lock()
+		task.state = COMPLETED
+		task.lock.Unlock()
+		// a task is completed, decrease remain count
+		m.mu.Lock()
+		if args.kind == "map" {
+			m.map_remain--
+		} else {
+			m.reduce_remain--
+		}
+		m.mu.Unlock()
+	}
 	return nil
 }
 
@@ -83,7 +151,7 @@ func (m *Master) Done() bool {
 	ret := false
 
 	m.mu.Lock()
-	if m.remain == 0 {
+	if m.reduce_remain == 0 {
 		ret = true
 	}
 	m.mu.Unlock()
@@ -98,9 +166,11 @@ func (m *Master) Done() bool {
 //
 func MakeMaster(files []string, nReduce int) *Master {
 	master := Master{}
+	master.mtasks = make([]*Task, len(files))
+	master.rtasks = make([]*Task, nReduce)
 	master.mu = sync.Mutex{}
-	master.remain = nReduce
-	master.phase = MAP
+	master.map_remain = len(files)
+	master.reduce_remain = nReduce
 
 	// initialize master data structure
 	for _, file := range files {
@@ -116,7 +186,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 		master.rtasks[i].lock = sync.Mutex{}
 	}
 
-	fmt.Printf("Master initialization completed\n")
+	fmt.Printf("Master: initialization completed\n")
 
 	master.server()
 	return &master
