@@ -42,12 +42,12 @@ func performMap(mapf func(string, string) []KeyValue, filename string, nReduce i
 	kvall := make([][]KeyValue, nReduce)
 	file, err := os.Open(filename)
 	if err != nil {
-		fmt.Printf("Worker: can not open %v\n", filename)
+		fmt.Fprintf(os.Stderr, "%s Worker: can not open %v\n", time.Now().String(), filename)
 		return false
 	}
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
-		fmt.Printf("Worker: can not read %v\n", filename)
+		fmt.Fprintf(os.Stderr, "%s Worker: can not read %v\n", time.Now().String(), filename)
 		return false
 	}
 	file.Close()
@@ -63,23 +63,25 @@ func performMap(mapf func(string, string) []KeyValue, filename string, nReduce i
 	// write key-value to different json files
 	for i, kva := range kvall {
 		// implement atomical write by two-phase trick: write to a temporary file and rename it
-		oldname := fmt.Sprintf("temp_inter_%d_%d", index, i)
-		tempfile, err := ioutil.TempFile("", oldname)
+		oldname := fmt.Sprintf("temp_inter_%d_%d.json", index, i)
+		tempfile, err := os.OpenFile(oldname, os.O_RDWR|os.O_CREATE, 0755)
 		if err != nil {
-			fmt.Printf("Worker: map can not open temp file %v\n", oldname)
+			fmt.Fprintf(os.Stderr, "%s Worker: map can not open temp file %v\n", time.Now().String(), oldname)
 			return false
 		}
+		defer os.Remove(oldname)
+
 		enc := json.NewEncoder(tempfile)
 		for _, kv := range kva {
 			if err := enc.Encode(&kv); err != nil {
-				fmt.Printf("Worker: map can not write to temp file %v\n", oldname)
+				fmt.Fprintf(os.Stderr, "%s Worker: map can not write to temp file %v\n", time.Now().String(), oldname)
 				return false
 			}
 		}
 
-		newname := fmt.Sprintf("inter_%d_%d", index, i)
+		newname := fmt.Sprintf("inter_%d_%d.json", index, i)
 		if err := os.Rename(oldname, newname); err != nil {
-			fmt.Printf("Worker: map can not rename temp file %v\n", oldname)
+			fmt.Fprintf(os.Stderr, "%s Worker: map can not rename temp file %v\n", time.Now().String(), oldname)
 			return false
 		}
 	}
@@ -92,10 +94,10 @@ func performMap(mapf func(string, string) []KeyValue, filename string, nReduce i
 func performReduce(reducef func(string, []string) string, splite int, index int) bool {
 	var kva []KeyValue
 	for i := 0; i < splite; i++ {
-		filename := fmt.Sprintf("inter_%d_%d", i, index)
+		filename := fmt.Sprintf("inter_%d_%d.json", i, index)
 		file, err := os.Open(filename)
 		if err != nil {
-			fmt.Printf("Worker: can not read intermidiate file %v\n", filename)
+			fmt.Fprintf(os.Stderr, "%s Worker: can not read intermidiate file %v\n", time.Now().String(), filename)
 			return false
 		}
 
@@ -114,13 +116,14 @@ func performReduce(reducef func(string, []string) string, splite int, index int)
 
 	// two-phase trick to implement atomical write
 	oldname := fmt.Sprintf("temp-mr-out-%d", index)
-	newname := fmt.Sprint("mr-out-%d", index)
+	newname := fmt.Sprintf("mr-out-%d", index)
 
-	tempfile, err := ioutil.TempFile("", oldname)
+	tempfile, err := os.OpenFile(oldname, os.O_RDWR|os.O_CREATE, 0755)
 	if err != nil {
-		fmt.Printf("Worker: reduce can not open temp file %v\n", oldname)
+		fmt.Fprintf(os.Stderr, "%s Worker: reduce can not open temp file %v\n", time.Now().String(), oldname)
 		return false
 	}
+	defer os.Remove(oldname)
 
 	// reduce on values that have the same key
 	i := 0
@@ -141,7 +144,7 @@ func performReduce(reducef func(string, []string) string, splite int, index int)
 	}
 
 	if err := os.Rename(oldname, newname); err != nil {
-		fmt.Printf("Worker: reduce can not rename temp file %v\n", oldname)
+		fmt.Fprintf(os.Stderr, "%s Worker: reduce can not rename temp file %v\n", time.Now().String(), oldname)
 		return false
 	}
 
@@ -161,10 +164,10 @@ func Worker(mapf func(string, string) []KeyValue,
 		if !(call("Master.HandleAsk", &args, &reply)) {
 			// can not connect to the master
 			// assume that the master has exited, then exit
-			fmt.Printf("Worker: exit")
+			fmt.Fprintf(os.Stderr, "%s Worker: exit", time.Now().String())
 			os.Exit(0)
 		}
-		if reply.kind == "none" {
+		if reply.Kind == "none" {
 			// no work to do
 			continue
 		}
@@ -173,25 +176,25 @@ func Worker(mapf func(string, string) []KeyValue,
 
 		response_args := ResponseArgs{}
 		response_reply := ResponseReply{}
-		if reply.kind == "map" {
-			if performMap(mapf, reply.file, reply.nReduce, reply.index) {
-				fmt.Printf("Worker: map task performed successfully\n")
-				response_args.kind = "map"
-				response_args.index = reply.index
+		if reply.Kind == "map" {
+			if performMap(mapf, reply.File, reply.NReduce, reply.Index) {
+				fmt.Fprintf(os.Stderr, "%s Worker: map task performed successfully\n", time.Now().String())
+				response_args.Kind = "map"
+				response_args.Index = reply.Index
 				if !(call("Master.HandleResponse", &response_args, &response_reply)) {
-					fmt.Printf("Worker: exit")
+					fmt.Fprintf(os.Stderr, "%s Worker: exit", time.Now().String())
 					os.Exit(0)
 				}
 			} else {
-				fmt.Printf("Worker: map task failed\n")
+				fmt.Fprintf(os.Stderr, "%s Worker: map task failed\n", time.Now().String())
 			}
 		} else {
-			if performReduce(reducef, reply.splite, reply.index) {
-				fmt.Printf("Worker: reduce task performed successfully\n")
-				response_args.kind = "reduce"
-				response_args.index = reply.index
+			if performReduce(reducef, reply.Splite, reply.Index) {
+				fmt.Fprintf(os.Stderr, "%s Worker: reduce task performed successfully\n", time.Now().String())
+				response_args.Kind = "reduce"
+				response_args.Index = reply.Index
 				if !(call("Master.HandleResponse", &response_args, &response_reply)) {
-					fmt.Printf("Worker: exit")
+					fmt.Fprintf(os.Stderr, "%s Worker: exit", time.Now().String())
 					os.Exit(0)
 				}
 			}

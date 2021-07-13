@@ -29,16 +29,16 @@ type ExampleReply struct {
 type AskArgs struct{}
 
 type AskReply struct {
-	kind    string
-	file    string
-	splite  int
-	nReduce int
-	index   int
+	Kind    string
+	File    string
+	Splite  int
+	NReduce int
+	Index   int
 }
 
 type ResponseArgs struct {
-	kind  string
-	index int
+	Kind  string
+	Index int
 }
 type ResponseReply struct{}
 
