@@ -121,7 +121,6 @@ inconsistent reads. On the other hand, GFS would not be good for
 storing account balances at a bank.
 
 Q: What if the master fails?
-
 A: There are replica masters with a full copy of the master state; the
 paper's design requires human intervention to switch to one of the
 replicas after a master failure (Section 5.1.3). We will see later how

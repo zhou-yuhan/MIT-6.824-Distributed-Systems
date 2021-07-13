@@ -24,7 +24,11 @@ Also I found this [documentation](https://golang.org/doc/code) useful to underst
 The design strictly follows the original MapReduce paper, except that all intermidiate files and output files are stored on 
 the single local file system other than a global file system like GFS.
 
-1. master
+![mapreduce](images/mapreduce.png)
+
+
+#### 1. master
+
 The master keeps a consistent data structure about all tasks, including their state (`IDLE`, `IN_PROGRESS` or `COMPLETED`) and the number of remaining tasks (`map_remain`, `reduce_remain`)
 
 Each time a worker asks the master for a task, the master checks all tasks and allocate an idle tasks if there exists one.
@@ -35,13 +39,13 @@ assumes the task invalid and ignore this message
 
 Each time the master is informed that a task has been performed, it decreases the remaining count until it reaches 0 and the master exits
 
-2. worker
+#### 2. worker
 
 Each worker periodically asks the master for a task via RPC, and if it gets a task it performs it. If the worker performs the task successfully it will inform the master via RPC.
 
 If the worker fails to connect to the master, it assumes that the master has exited (all tasks have been done or the master has crashed) and exits.
 
-3. concurrent consistency
+#### 3. concurrent consistency
 
 The master's data structure is accessed concurrently and needs to be protected by mutexes
 

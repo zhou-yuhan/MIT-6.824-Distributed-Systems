@@ -240,7 +240,7 @@ What would it take to have no anomalies -- strict consistency?
     Or client should not issue them.
   * All secondaries should complete each write, or none.
     Perhaps tentative writes until all promise to complete it?
-    Don't expose writes until all have agreed to perform them!
+    Don't expose writes until all have agreed to perform them! (two-phase trick)
   * If primary crashes, some replicas may be missing the last few ops.
     New primary must talk to all replicas to find all recent ops,
     and sync with secondaries.
