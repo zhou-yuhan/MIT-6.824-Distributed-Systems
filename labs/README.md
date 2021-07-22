@@ -54,3 +54,7 @@ To ensure the consistency of files in case of crashes during writing, the two-ph
 ### Implementation
 
 See `src/mr/master.go` `src/mr/rpc.go`, `src/mr/worker.go`
+
+
+## 2. Raft
+[blog from TA](https://thesquareplanet.com/blog/students-guide-to-raft/)
