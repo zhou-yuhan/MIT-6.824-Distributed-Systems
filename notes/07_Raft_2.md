@@ -102,7 +102,7 @@ depending on who is elected leader in Figure 7, different entries
   some will certainly be discarded: f's 2 and 3; e's last 4,4
   c's 6,6 and d's 7,7 may be discarded OR committed
 
-how to roll back quickly
+*** how to roll back quickly ***
   the Figure 2 design backs up one entry per RPC -- slow!
   lab tester may require faster roll-back
   paper outlines a scheme towards end of Section 5.3
@@ -119,7 +119,7 @@ how to roll back quickly
   Case 1 (leader doesn't have XTerm):
     nextIndex = XIndex
   Case 2 (leader has XTerm):
-    nextIndex = leader's last entry for XTerm
+    nextIndex = leader's last entry for XTerm + 1
   Case 3 (follower's log is too short):
     nextIndex = XLen
 
