@@ -54,3 +54,11 @@ To ensure the consistency of files in case of crashes during writing, the two-ph
 ### Implementation
 
 See `src/mr/master.go` `src/mr/rpc.go`, `src/mr/worker.go`
+
+
+## 2. Raft
+
+Before writing any code, make sure the original paper of Raft makes sense to you and strictly follow the instructions from figure 2
+![Raft](images/Raft.png)
+
+Also, this [blog from TA](https://thesquareplanet.com/blog/students-guide-to-raft/) helps a lot. It's *Implementing Raft* section relates to this lab and *Applications on top of Raft* section relates to lab 3
