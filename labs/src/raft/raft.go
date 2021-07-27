@@ -57,8 +57,8 @@ const (
 )
 
 type Log struct {
-	term    int
-	command interface{}
+	Term    int
+	Command interface{}
 }
 
 //
@@ -117,17 +117,70 @@ func (rf *Raft) resetTimer() {
 	rf.mu.Unlock()
 }
 
-func (rf *Raft) startNewElection() {
+func (rf *Raft) startHeartBeat() {
+	for {
+		rf.mu.Lock()
+		if rf.state != LEADER {
+			rf.mu.Unlock()
+			return
+		}
+		term := rf.currentTerm
+		prevLogIndex := len(rf.log) - 1
+		prevLogTerm := rf.log[prevLogIndex].Term
+		leaderCommit := rf.commitIndex
+		rf.mu.Unlock()
+
+		peerNum := len(rf.peers)
+		for i := 0; i < peerNum; i++ {
+			if i == rf.me {
+				continue
+			}
+			args := AppendEntriesArgs{term, rf.me, prevLogIndex, prevLogTerm, []Log{}, leaderCommit}
+			reply := AppendEntriesReply{}
+			go rf.sendAppendEntries(i, &args, &reply)
+		}
+		time.Sleep(HEARTBEAT)
+	}
+}
+
+func (rf *Raft) leader() {
+	// comes to power, initialize fields
+	rf.mu.Lock()
+	rf.state = LEADER
+	rf.votedFor = -1
+	peerNum := len(rf.peers)
+	for i := 0; i < peerNum; i++ {
+		rf.nextIndex[i] = len(rf.log) // leader last log index + 1
+		rf.matchIndex[i] = 0
+	}
+	rf.mu.Unlock()
+
+	go rf.startHeartBeat()
+
+	// TODO: leader work
+	for {
+		rf.mu.Lock()
+		if rf.state == FOLLOWER {
+			rf.mu.Unlock()
+			go rf.follower()
+			return
+		}
+		rf.mu.Unlock()
+	}
+}
+
+func (rf *Raft) candidate() {
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.state = CANDIDATE
+	rf.votedFor = rf.me
 	rf.voteCount = 1 // vote for itself
 
 	peerNum := len(rf.peers)
 	term := rf.currentTerm
 	me := rf.me
 	lastLogIndex := len(rf.log) - 1
-	lastLogTerm := rf.log[lastLogIndex].term
+	lastLogTerm := rf.log[lastLogIndex].Term
 	rf.mu.Unlock()
 
 	rf.resetTimer()
@@ -146,23 +199,24 @@ func (rf *Raft) startNewElection() {
 	// a candidate continues its state until one of three things happens
 	// a conditional variable should be used here, but event a) b) and c)
 	// are triggered by different goroutines, which increases complexity
-	// therefore buzy waiting is used here
+	// therefore busy waiting is used here
 	for {
 		rf.mu.Lock()
 		if rf.voteCount > peerNum/2 {
 			// a) the candidate wins and becomes leader
-			// TODO: leader action
 			rf.mu.Unlock()
+			go rf.leader()
 			break
 		}
 		if rf.state == FOLLOWER {
 			// b) another server establishes itself as leader
-			// TODO: follower action
 			rf.mu.Unlock()
+			go rf.follower()
 			break
 		}
 		if rf.currentTerm > term {
-			// c) it has started a new election
+			// c) a certain peer has already started a new election
+			// at this moment, this peer is either running follower() or candidate()
 			rf.mu.Unlock()
 			break
 		}
@@ -171,9 +225,14 @@ func (rf *Raft) startNewElection() {
 	}
 }
 
+func (rf *Raft) follower() {
+	go rf.startElectionTimer()
+	// TODO: follower
+}
+
 // election timeout goroutine periodically checks
-// whether the time since the last time heard from the leader
-// is greater than the timeout period. If so, start a new election and return
+// whether the time since the last time heard from the leader is greater than the timeout period.
+// If so, start a new election and return
 // each time a server becomes a follower or starts an election, start this timer goroutine
 func (rf *Raft) startElectionTimer() {
 	for {
@@ -183,8 +242,8 @@ func (rf *Raft) startElectionTimer() {
 		rf.mu.Unlock()
 		now := time.Now()
 		if now.After(lastHeard.Add(electionTimeout)) {
-			go rf.startNewElection()
-			break
+			go rf.candidate()
+			return
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
@@ -255,6 +314,40 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		rf.mu.Unlock()
+		return
+	}
+	// follow the second rule in "Rules for Servers" in figure 2 before handling an incoming RPC
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = FOLLOWER
+		rf.votedFor = -1
+	}
+
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = true
+	// deny vote if already voted
+	if rf.votedFor != -1 {
+		reply.VoteGranted = false
+		rf.mu.Unlock()
+		return
+	}
+	// deny vote if consistency check fails (candidate is less up-to-date)
+	lastLog := rf.log[len(rf.log)-1]
+	if args.LastLogTerm < lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex < len(rf.log)-1) {
+		reply.VoteGranted = false
+		rf.mu.Unlock()
+		return
+	}
+	// now this peer must vote for the candidate
+	rf.votedFor = args.CandidateID
+	rf.mu.Unlock()
+
+	rf.resetTimer()
 }
 
 type AppendEntriesArgs struct {
@@ -262,7 +355,7 @@ type AppendEntriesArgs struct {
 	LeaderID     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	entries      []Log
+	Entries      []Log
 	LeaderCommit int
 }
 
@@ -272,7 +365,32 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		rf.mu.Unlock()
+		return
+	}
+	// follow the second rule in "Rules for Servers" in figure 2 before handling an incoming RPC
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = FOLLOWER
+		rf.votedFor = -1
+	}
+	rf.mu.Unlock()
+	// now we must have rf.currentTerm == args.Term, which means receiving from leader and reset timer
+	rf.resetTimer()
 
+	// consistency check
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if len(rf.log)-1 < args.PrevLogIndex || rf.log[len(rf.log)-1].Term != args.PrevLogTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+	// TODO: log replication
 }
 
 //
@@ -317,6 +435,29 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	}
 	if reply.VoteGranted {
 		rf.voteCount++
+	}
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	for {
+		if ok := rf.peers[server].Call("Raft.AppendEntries", args, reply); !ok {
+			continue
+		}
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.state = FOLLOWER
+			return
+		}
+		if reply.Success {
+			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+			rf.nextIndex[server] = rf.matchIndex[server] + 1
+			return
+		} else {
+			return
+			// TODO: roll back and send RPC again
+		}
 	}
 }
 
@@ -390,20 +531,22 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = []Log{}
+	// log index counts from 1, index 0 is filled with a fake log with term 0
+	rf.log = append(rf.log, Log{0, nil})
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
-	rf.nextIndex = []int{}
-	rf.matchIndex = []int{}
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
 
 	rf.resetTimer()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	// start election timeout timer as a follower
-	go rf.startElectionTimer()
+	// start as a follower
+	go rf.follower()
 
 	return rf
 }
