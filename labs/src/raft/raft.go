@@ -89,10 +89,11 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	// additional fields that are not mentioned in paper
+	// additional fields that are helpful for implementation
 	electionTimeout time.Duration
-	lastHeard       time.Time // last time heard from the leader
-	voteCount       int       // how many votes does a candidate get from an election
+	lastHeard       time.Time  // last time heard from the leader
+	voteCount       int        // how many votes does a candidate get from an election
+	applyCond       *sync.Cond // used to kick the applier goroutine
 }
 
 // return currentTerm and whether this server
@@ -107,6 +108,22 @@ func (rf *Raft) GetState() (int, bool) {
 	isleader = rf.state == LEADER
 	rf.mu.Unlock()
 	return term, isleader
+}
+
+// periodically check if there are logs to be applied
+// i.e. tf.commitIndex > rf.lastApplied
+func (rf *Raft) applier(applyChan chan ApplyMsg) {
+	for {
+		rf.mu.Lock()
+		for rf.commitIndex <= rf.lastApplied {
+			rf.applyCond.Wait()
+		}
+		for rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			applyChan <- ApplyMsg{true, rf.log[rf.lastApplied].Command, rf.lastApplied}
+		}
+		rf.mu.Unlock()
+	}
 }
 
 func (rf *Raft) resetTimer() {
@@ -225,9 +242,9 @@ func (rf *Raft) candidate() {
 	}
 }
 
+// follower's behaviors are mostly handled by RPC handlers
 func (rf *Raft) follower() {
 	go rf.startElectionTimer()
-	// TODO: follower
 }
 
 // election timeout goroutine periodically checks
@@ -245,7 +262,7 @@ func (rf *Raft) startElectionTimer() {
 			go rf.candidate()
 			return
 		}
-		time.Sleep(25 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -362,6 +379,10 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	// for roll back optimization
+	conflictTerm  int
+	conflictIndex int
+	logLen        int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -382,15 +403,69 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// now we must have rf.currentTerm == args.Term, which means receiving from leader and reset timer
 	rf.resetTimer()
 
-	// consistency check
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if len(rf.log)-1 < args.PrevLogIndex || rf.log[len(rf.log)-1].Term != args.PrevLogTerm {
+
+	// consistency check
+	if len(rf.log)-1 < args.PrevLogIndex {
+		// case 3: follower's log is too short
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		reply.conflictIndex = 0
+		reply.conflictTerm = 0
+		reply.logLen = len(rf.log) - 1
 		return
 	}
-	// TODO: log replication
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		// case 1, 2: conflict at entry PrevLogIndex
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		reply.conflictTerm = rf.log[args.PrevLogIndex].Term
+		for i := args.PrevLogIndex; i > 0; i-- {
+			if rf.log[i-1].Term != reply.conflictTerm {
+				reply.conflictIndex = i
+				break
+			}
+		}
+		return
+	}
+	// accept new entries
+	reply.Term = rf.currentTerm
+	reply.Success = true
+
+	// log replication
+	if len(args.Entries) == 0 {
+		return
+	}
+	conflictEntry := -1
+	for i := 0; i < len(args.Entries); i++ {
+		if len(rf.log)-1 < args.PrevLogIndex+i+1 || args.Entries[i].Term != rf.log[args.PrevLogIndex+i+1].Term {
+			// existing an entry conflicts with a new one, truncate the log
+			rf.log = rf.log[:args.PrevLogIndex+i+1]
+			conflictEntry = i
+			break
+		}
+	}
+	if conflictEntry != -1 {
+		// need to append new entries to the log
+		for i := conflictEntry; i < len(args.Entries); i++ {
+			rf.log = append(rf.log, args.Entries[i])
+		}
+	}
+
+	// advance commitIndex if possible
+	if args.LeaderCommit > rf.commitIndex {
+		// BUG? index of last new entry == args.PrevLogIndex+len(args.Entries)) based on my comprehension
+		rf.commitIndex = min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
+	}
+}
+
+// I just wonder why `math` package does not provide this simple function
+func min(x, y int) int {
+	if x < y {
+		return x
+	}
+	return y
 }
 
 //
@@ -426,8 +501,15 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if ok := rf.peers[server].Call("Raft.RequestVote", args, reply); !ok {
 		return
 	}
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	// drop old reply
+	if rf.currentTerm != args.Term {
+		return
+	}
+
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.state = FOLLOWER
@@ -439,24 +521,47 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	for {
-		if ok := rf.peers[server].Call("Raft.AppendEntries", args, reply); !ok {
-			continue
-		}
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		if reply.Term > rf.currentTerm {
-			rf.currentTerm = reply.Term
-			rf.state = FOLLOWER
-			return
-		}
-		if reply.Success {
-			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-			rf.nextIndex[server] = rf.matchIndex[server] + 1
-			return
+	if ok := rf.peers[server].Call("Raft.AppendEntries", args, reply); !ok {
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// drop old reply
+	if rf.currentTerm != args.Term {
+		return
+	}
+
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.state = FOLLOWER
+		return
+	}
+	if reply.Success {
+		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+		rf.nextIndex[server] = rf.matchIndex[server] + 1
+		// TODO: count replication success
+		return
+	} else {
+		// roll back nextIndex for this follower
+		if reply.conflictIndex == 0 {
+			// case 3: follower's log is too short
+			rf.nextIndex[server] = reply.logLen
 		} else {
-			return
-			// TODO: roll back and send RPC again
+			hasTerm := false
+			for i := len(rf.log) - 1; i > 0; i-- {
+				if rf.log[i].Term == reply.conflictTerm {
+					// case 2: leader has conflictTerm
+					hasTerm = true
+					rf.nextIndex[server] = i + 1
+					break
+				}
+			}
+			if !hasTerm {
+				// case 1: leader does not has conflictTerm
+				rf.nextIndex[server] = reply.conflictIndex
+			}
 		}
 	}
 }
@@ -540,6 +645,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 
+	rf.applyCond = sync.NewCond(&rf.mu)
+
 	rf.resetTimer()
 
 	// initialize from state persisted before a crash
@@ -547,6 +654,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start as a follower
 	go rf.follower()
+
+	// start apply check as a daemon
+	go rf.applier(applyCh)
 
 	return rf
 }
