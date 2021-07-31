@@ -114,6 +114,10 @@ func (rf *Raft) GetState() (int, bool) {
 // i.e. tf.commitIndex > rf.lastApplied
 func (rf *Raft) applier(applyChan chan ApplyMsg) {
 	for {
+		if rf.killed() {
+			return
+		}
+
 		rf.mu.Lock()
 		for rf.commitIndex <= rf.lastApplied {
 			rf.applyCond.Wait()
@@ -136,6 +140,10 @@ func (rf *Raft) resetTimer() {
 
 func (rf *Raft) startHeartBeat() {
 	for {
+		if rf.killed() {
+			return
+		}
+
 		rf.mu.Lock()
 		if rf.state != LEADER {
 			rf.mu.Unlock()
@@ -174,14 +182,50 @@ func (rf *Raft) leader() {
 
 	go rf.startHeartBeat()
 
-	// TODO: leader work
+	// leader work
 	for {
+		if rf.killed() {
+			return
+		}
+
 		rf.mu.Lock()
 		if rf.state == FOLLOWER {
 			rf.mu.Unlock()
 			go rf.follower()
 			return
 		}
+
+		// log replication
+		for server, index := range rf.nextIndex {
+			if len(rf.log)-1 >= index {
+				args := AppendEntriesArgs{
+					rf.currentTerm, rf.me, index - 1,
+					rf.log[index-1].Term, rf.log[index:],
+					rf.commitIndex,
+				}
+				reply := AppendEntriesReply{}
+				go rf.sendAppendEntries(server, &args, &reply)
+			}
+		}
+
+		// commit log entry if possible
+		for n := len(rf.log) - 1; n > rf.commitIndex; n-- {
+			if rf.log[n].Term != rf.currentTerm {
+				continue
+			}
+			// a majority of matchIndex[i] >= n
+			matchNum := 0
+			for _, index := range rf.matchIndex {
+				if index >= n {
+					matchNum++
+				}
+			}
+			if matchNum > len(rf.peers)/2 {
+				rf.commitIndex = n
+				break
+			}
+		}
+
 		rf.mu.Unlock()
 	}
 }
@@ -218,6 +262,10 @@ func (rf *Raft) candidate() {
 	// are triggered by different goroutines, which increases complexity
 	// therefore busy waiting is used here
 	for {
+		if rf.killed() {
+			return
+		}
+
 		rf.mu.Lock()
 		if rf.voteCount > peerNum/2 {
 			// a) the candidate wins and becomes leader
@@ -253,6 +301,9 @@ func (rf *Raft) follower() {
 // each time a server becomes a follower or starts an election, start this timer goroutine
 func (rf *Raft) startElectionTimer() {
 	for {
+		if rf.killed() {
+			return
+		}
 		rf.mu.Lock()
 		electionTimeout := rf.electionTimeout
 		lastHeard := rf.lastHeard
@@ -380,9 +431,9 @@ type AppendEntriesReply struct {
 	Term    int
 	Success bool
 	// for roll back optimization
-	conflictTerm  int
-	conflictIndex int
-	logLen        int
+	ConflictTerm  int
+	ConflictIndex int
+	LogLen        int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -411,19 +462,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// case 3: follower's log is too short
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		reply.conflictIndex = 0
-		reply.conflictTerm = 0
-		reply.logLen = len(rf.log) - 1
+		reply.ConflictIndex = 0
+		reply.ConflictTerm = 0
+		reply.LogLen = len(rf.log) - 1
 		return
 	}
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		// case 1, 2: conflict at entry PrevLogIndex
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		reply.conflictTerm = rf.log[args.PrevLogIndex].Term
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
 		for i := args.PrevLogIndex; i > 0; i-- {
-			if rf.log[i-1].Term != reply.conflictTerm {
-				reply.conflictIndex = i
+			if rf.log[i-1].Term != reply.ConflictTerm {
+				reply.ConflictIndex = i
 				break
 			}
 		}
@@ -457,6 +508,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		// BUG? index of last new entry == args.PrevLogIndex+len(args.Entries)) based on my comprehension
 		rf.commitIndex = min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
+		rf.applyCond.Broadcast()
 	}
 }
 
@@ -541,17 +593,16 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	if reply.Success {
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
-		// TODO: count replication success
 		return
 	} else {
 		// roll back nextIndex for this follower
-		if reply.conflictIndex == 0 {
+		if reply.ConflictIndex == 0 {
 			// case 3: follower's log is too short
-			rf.nextIndex[server] = reply.logLen
+			rf.nextIndex[server] = reply.LogLen
 		} else {
 			hasTerm := false
 			for i := len(rf.log) - 1; i > 0; i-- {
-				if rf.log[i].Term == reply.conflictTerm {
+				if rf.log[i].Term == reply.ConflictTerm {
 					// case 2: leader has conflictTerm
 					hasTerm = true
 					rf.nextIndex[server] = i + 1
@@ -560,7 +611,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			}
 			if !hasTerm {
 				// case 1: leader does not has conflictTerm
-				rf.nextIndex[server] = reply.conflictIndex
+				rf.nextIndex[server] = reply.ConflictIndex
 			}
 		}
 	}
@@ -581,13 +632,17 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	return index, term, isLeader
+	if rf.killed() || rf.state != LEADER {
+		return len(rf.log), rf.currentTerm, false
+	}
+
+	rf.log = append(rf.log, Log{rf.currentTerm, command})
+
+	return len(rf.log) - 1, rf.currentTerm, true
 }
 
 //
