@@ -222,11 +222,13 @@ func (rf *Raft) leader() {
 			}
 			if matchNum > len(rf.peers)/2 {
 				rf.commitIndex = n
+				rf.applyCond.Broadcast()
 				break
 			}
 		}
 
 		rf.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -558,7 +560,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	defer rf.mu.Unlock()
 
 	// drop old reply
-	if rf.currentTerm != args.Term {
+	if reply.Term != args.Term {
 		return
 	}
 
@@ -581,7 +583,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	defer rf.mu.Unlock()
 
 	// drop old reply
-	if rf.currentTerm != args.Term {
+	if args.Term != reply.Term {
 		return
 	}
 

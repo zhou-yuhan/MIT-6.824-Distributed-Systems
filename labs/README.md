@@ -8,9 +8,9 @@ I finished these labs in Visual Studio Code, which has a wonderful [Go extension
 $ go env -w GO111MODULE=on
 $ go env -w GOPROXY=https://goproxy.io,direct
 ```
-
-2. click `install all` button to install go tools in VS Code and this time you  should get message `SUCCEED`
-3. IMPORTANT: unset `GO111MODULE`, otherwise you may get trouble running the labs as I did(errors like "could not import 'fmt'...")
+2. restart VS Code or terminal 
+3. click `install all` button to install go tools in VS Code and this time you  should get message `SUCCEED`
+4. IMPORTANT: unset `GO111MODULE`, otherwise you may get trouble running the labs as I did(errors like "could not import 'fmt'...")
 ```
 $ go env -w GO111MODULE=off
 ```
