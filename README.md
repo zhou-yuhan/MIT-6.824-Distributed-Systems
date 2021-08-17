@@ -24,3 +24,13 @@ Concepts and general techniques of distributed systems introduced by this course
 - Optimistic Concurrency Control: read - bufferd write - validation - commit / abort
 	- execution phase: read - buffered write
 	- commit phase: (write) lock - (read) validation - commit backup - commit primary 
+15. Spark
+- RDD (Resilient Distributed Datasets): in-memory partitions of read-only data
+- execution:
+	- *transformations*: `map filter join` lazy
+	- *actions*: `count collect save` instant
+- fault-tolerance: lineage graph holds dependancy of RDDs, re-execute if fails
+- application:
+	- PageRank
+	- ML tasks
+	- Generalized MapReduce
