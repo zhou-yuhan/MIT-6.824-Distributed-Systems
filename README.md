@@ -34,3 +34,30 @@ Concepts and general techniques of distributed systems introduced by this course
 	- PageRank
 	- ML tasks
 	- Generalized MapReduce
+
+16. Memcached at Facebook
+- architecture evolution of Web service
+- performance consistency trade-off
+- memcache: data cache between front end and back end servers
+	- look-aside (compared to look-through cache)
+	- on write: invalidate instead of update
+	- lease: stress 2 problems
+		- stale data: memcache holds stale data indefinitely
+		- thundering herd: intensive write and read to the same key 
+	- cold cache warmup
+
+17. COPS
+- ALPS system: Availability, low Latency, Partition-tolerance, high Scalability
+- CAP Theorem: strong consistency, availability and partition-tolerance can not all be achieved
+- consistency models: 
+```
+							    > causal > FIFO
+linearizability (strong consistency) > sequential > causal+  
+							    > per-key sequential > eventual
+```
+- *causal+ consistency*: *causal consistency* + *convergent conflict handling*
+- implementation:
+	- overview: client library and data storage nodes per data center
+	- *version*: Lamport Logical Clock
+	- *dependency*: records *potential causality*
+	- conflict handling: default last-writer-wins 
