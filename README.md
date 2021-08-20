@@ -61,3 +61,14 @@ linearizability (strong consistency) > sequential > causal+
 	- *version*: Lamport Logical Clock
 	- *dependency*: records *potential causality*
 	- conflict handling: default last-writer-wins 
+
+18. Certificate Transparency (CT)
+- man-in-the-middle attack: before 1995
+- digital signature
+- digital certificate: SSL HTTPS TLS
+- certificate transparency
+	- motivation: some certificate authorities (CA) becomes mallicious
+	- idea: allow certificates to be public for audit via a public CT log system
+	- implementation:
+		- Merkle Tree: inclusion proof,consistency proof
+		- *gossip*: monitors and browsers compare sign tree head (STH) to check consistency in case of fork attack
