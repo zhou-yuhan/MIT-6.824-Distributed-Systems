@@ -72,3 +72,13 @@ linearizability (strong consistency) > sequential > causal+
 	- implementation:
 		- Merkle Tree: inclusion proof,consistency proof
 		- *gossip*: monitors and browsers compare sign tree head (STH) to check consistency in case of fork attack
+
+19. Bitcoin
+- decentralized ledger
+- block chain
+- [best explaination on Youtube](https://www.youtube.com/watch?v=bBC-nXj3Ng4)
+
+20. Blockstack
+- decentralized apps: move ownership of data into user's hands instead of service provider
+- Public Key Infrastructure (PKI): map names to data locations and public keys, essensial system for secure internet apps. Yet no global PKI has been implemented
+- Zooko's triangle: unique-global, human-readable, decentralized PKI is hard to achieve 
