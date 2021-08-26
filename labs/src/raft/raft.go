@@ -18,16 +18,17 @@ package raft
 //
 
 import (
+	"bytes"
+	"fmt"
 	"math/rand"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"../labgob"
 	"../labrpc"
 )
-
-// import "bytes"
-// import "../labgob"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -237,6 +238,7 @@ func (rf *Raft) candidate() {
 	rf.currentTerm++
 	rf.state = CANDIDATE
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.voteCount = 1 // vote for itself
 
 	peerNum := len(rf.peers)
@@ -323,7 +325,7 @@ func (rf *Raft) startElectionTimer() {
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
-//
+// this function can only be called when `rf` holds the lock
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
@@ -333,6 +335,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	buf := new(bytes.Buffer)
+	enc := labgob.NewEncoder(buf)
+	enc.Encode(rf.currentTerm)
+	enc.Encode(rf.votedFor)
+	enc.Encode(rf.log)
+	data := buf.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -355,6 +364,22 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	buf := bytes.NewBuffer(data)
+	de := labgob.NewDecoder(buf)
+	var currentTerm int
+	var votedFor int
+	var log []Log
+	count := 0
+	for de.Decode(&currentTerm) != nil || de.Decode(&votedFor) != nil || de.Decode(&log) != nil {
+		fmt.Fprintf(os.Stderr, "Peer #%d failed to decode state from persister, retrying...\n", rf.me)
+		count++
+		if count > 5 {
+			panic("Peer #%d failed to decode state from persister, abort\n")
+		}
+	}
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.log = log
 }
 
 //
@@ -396,6 +421,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.state = FOLLOWER
 		rf.votedFor = -1
+		rf.persist()
 	}
 
 	reply.Term = rf.currentTerm
@@ -451,6 +477,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.state = FOLLOWER
 		rf.votedFor = -1
+		rf.persist()
 	}
 	rf.mu.Unlock()
 	// now we must have rf.currentTerm == args.Term, which means receiving from leader and reset timer
@@ -505,6 +532,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log = append(rf.log, args.Entries[i])
 		}
 	}
+
+	rf.persist() // log has changed
 
 	// advance commitIndex if possible
 	if args.LeaderCommit > rf.commitIndex {
@@ -566,6 +595,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
+		rf.persist()
 		rf.state = FOLLOWER
 		return
 	}
@@ -589,6 +619,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
+		rf.persist()
 		rf.state = FOLLOWER
 		return
 	}
@@ -643,6 +674,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	rf.log = append(rf.log, Log{rf.currentTerm, command})
+	rf.persist()
 
 	return len(rf.log) - 1, rf.currentTerm, true
 }
